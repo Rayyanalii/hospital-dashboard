@@ -1,24 +1,23 @@
-# app.py
 import streamlit as st
 from db import init_db, get_conn
 from auth import authenticate, hash_password, can
 from security import mask_name, mask_contact, encrypt_value, decrypt_value
 from logs import write_log, fetch_logs
 import pandas as pd
-from datetime import datetime, timedelta
+import datetime
 import sqlite3
 import io
 import shutil
 from pathlib import Path
+import pytz
 
-# Initialize DB (creates hospital.db and seeds users if needed)
 init_db()
 
-# Track app start time for uptime
-if "app_start" not in st.session_state:
-    st.session_state["app_start"] = datetime.now(datetime.timezone.utc)
+tz = pytz.timezone('Asia/Karachi')
 
-# --- Login UI ---
+if "app_start" not in st.session_state:
+    st.session_state["app_start"] = datetime.datetime.now(datetime.UTC)
+
 if "user" not in st.session_state:
     st.set_page_config(page_title="Hospital Dashboard — Login")
     st.title("Hospital Dashboard — Login")
@@ -33,7 +32,6 @@ if "user" not in st.session_state:
             else:
                 st.error("Invalid credentials")
         except Exception as e:
-            # Log unexpected login errors to DB (if possible) and show friendly message
             try:
                 write_log(None, "unknown", "login_error", str(e))
             except Exception:
@@ -46,7 +44,6 @@ else:
     st.sidebar.write(f"Logged in as: **{user['username']}**  \nRole: **{user['role']}**")
     page = st.sidebar.radio("Page", ["Patients","Add / Edit Patient","Anonymize","Audit Logs","Export & Backup","Logout"])
     
-    # --- Patients Page ---
     if page == "Patients":
         st.header("Patients")
         try:
@@ -82,10 +79,8 @@ else:
             write_log(user["user_id"], user["role"], "error", f"Patients read unexpected: {str(e)}")
             st.error("Unexpected error while loading patients.")
 
-    # --- Add / Edit Patient Page ---
     elif page == "Add / Edit Patient":
         st.header("Add / Edit Patient")
-        # Who can add/edit? Admin and Receptionist allow edit/add; doctors not allowed to edit
         can_edit = can(user["role"], "edit")
         if not can_edit:
             st.info("You do not have permission to add or edit patient records.")
@@ -93,7 +88,6 @@ else:
             try:
                 conn = get_conn()
                 cur = conn.cursor()
-                # Provide a select box for editing existing records
                 cur.execute("SELECT patient_id, date_added FROM patients ORDER BY date_added DESC")
                 patients = cur.fetchall()
                 patient_options = {row["patient_id"]: row["patient_id"] for row in patients}
@@ -109,7 +103,7 @@ else:
                             st.error("Name is required.")
                         else:
                             try:
-                                now = datetime.utcnow().isoformat()
+                                now = datetime.datetime.now(datetime.UTC).isoformat()
                                 cur.execute(
                                     "INSERT INTO patients (name, contact, diagnosis, date_added) VALUES (?,?,?,?)",
                                     (name.strip(), contact.strip(), diagnosis.strip(), now)
@@ -129,15 +123,12 @@ else:
                         st.error("Selected patient not found.")
                     else:
                         st.subheader(f"Edit patient id={pid}")
-                        # Respect RBAC for viewing sensitive fields:
                         if can(user["role"], "view_raw"):
                             name_val = row["name"]
                             contact_val = row["contact"]
                         else:
-                            # do not show raw sensitive fields to roles that can't view them
                             name_val = ""
                             contact_val = ""
-                        # Show anonymized versions (if available) as info for context
                         st.info(f"Anonymized name: {row['anonymized_name'] or mask_name(row['name'], row['patient_id'])}")
                         st.info(f"Anonymized contact: {row['anonymized_contact'] or mask_contact(row['contact'])}")
                         name = st.text_input("Name (raw viewable only to Admin)", value=name_val)
@@ -148,7 +139,6 @@ else:
                         with col1:
                             if st.button("Save Changes"):
                                 try:
-                                    # Validate: name not empty if admin editing raw
                                     if can(user["role"], "view_raw") and not name.strip():
                                         st.error("Name cannot be empty.")
                                     else:
@@ -166,7 +156,6 @@ else:
                                     st.error("Failed to save changes (DB error).")
                         with col2:
                             if st.button("Delete Patient"):
-                                # Only allow Admin to actually delete
                                 if user["role"] != "admin":
                                     st.error("Only admin can delete records.")
                                 else:
@@ -186,7 +175,6 @@ else:
                 write_log(user["user_id"], user["role"], "error", f"Add/Edit unexpected: {str(e)}")
                 st.error("Unexpected error on Add/Edit page.")
 
-    # --- Anonymize Page (Admin only) ---
     elif page == "Anonymize":
         st.header("Anonymize / Pseudonymize Data (Admin only)")
         if user["role"] != "admin":
@@ -197,7 +185,6 @@ else:
             try:
                 conn = get_conn()
                 cur = conn.cursor()
-                # Count how many need anonymization
                 cur.execute("SELECT COUNT(*) FROM patients WHERE anonymized_name IS NULL OR anonymized_name = ''")
                 to_anonymize = cur.fetchone()[0]
                 st.write(f"Records needing anonymization: {to_anonymize}")
@@ -211,7 +198,6 @@ else:
                             contact = r["contact"] or ""
                             anon_name = mask_name(name, pid)
                             anon_contact = mask_contact(contact)
-                            # Update anonymized columns
                             cur.execute(
                                 "UPDATE patients SET anonymized_name=?, anonymized_contact=? WHERE patient_id=?",
                                 (anon_name, anon_contact, pid)
@@ -222,18 +208,15 @@ else:
                     except sqlite3.Error as e:
                         write_log(user["user_id"], user["role"], "db_error", f"Anonymize failed: {str(e)}")
                         st.error("Anonymization failed (DB error).")
-                # Optional reversible encryption (bonus): store encrypted raw into enc_name/enc_contact columns
                 st.markdown("---")
                 if st.checkbox("Also encrypt raw data into enc_name/enc_contact columns (reversible, bonus)"):
                     if st.button("Encrypt raw fields into enc_name/enc_contact"):
                         try:
-                            # ensure columns exist; add them if not
                             try:
                                 cur.execute("ALTER TABLE patients ADD COLUMN enc_name BLOB")
                                 cur.execute("ALTER TABLE patients ADD COLUMN enc_contact BLOB")
                                 conn.commit()
                             except sqlite3.Error:
-                                # Likely columns exist already; ignore
                                 pass
                             cur.execute("SELECT patient_id, name, contact FROM patients")
                             rows = cur.fetchall()
@@ -259,7 +242,6 @@ else:
                 write_log(user["user_id"], user["role"], "error", f"Anonymize page unexpected: {str(e)}")
                 st.error("Unexpected error on anonymize page.")
 
-    # --- Audit Logs Page (Admin only) ---
     elif page == "Audit Logs":
         st.header("Integrity Audit Log (Admin only)")
         if user["role"] != "admin":
@@ -271,18 +253,15 @@ else:
                     st.info("No logs yet.")
                 else:
                     df_logs = pd.DataFrame([dict(r) for r in logs])
-                    # basic filters
                     st.sidebar.subheader("Log Filters")
                     roles = ["all"] + sorted(df_logs['role'].dropna().unique().tolist())
                     actions = ["all"] + sorted(df_logs['action'].dropna().unique().tolist())
                     sel_role = st.sidebar.selectbox("Role", roles)
                     sel_action = st.sidebar.selectbox("Action", actions)
-                    start_date = st.sidebar.date_input("From date", value=datetime.utcnow().date() - timedelta(days=30))
-                    end_date = st.sidebar.date_input("To date", value=datetime.utcnow().date())
+                    start_date = st.sidebar.date_input("From date", value=datetime.datetime.now(datetime.UTC).date() - datetime.timedelta(days=30))
+                    end_date = st.sidebar.date_input("To date", value=datetime.datetime.now(datetime.UTC).date())
                     
-                    # apply filters
                     df_filter = df_logs.copy()
-                    # parse timestamp to datetime for filtering
                     df_filter["timestamp_dt"] = pd.to_datetime(df_filter["timestamp"], errors="coerce")
                     df_filter = df_filter[(df_filter["timestamp_dt"].dt.date >= start_date) & (df_filter["timestamp_dt"].dt.date <= end_date)]
                     if sel_role != "all":
@@ -292,7 +271,6 @@ else:
                     st.dataframe(df_filter.sort_values("timestamp_dt", ascending=False).drop(columns=["timestamp_dt"]))
                     write_log(user["user_id"], user["role"], "view_logs", f"Viewed logs with filters role={sel_role} action={sel_action}")
                     
-                    # CSV export of logs
                     csv = df_filter.to_csv(index=False).encode('utf-8')
                     st.download_button("Download filtered logs (CSV)", csv, file_name="audit_logs.csv", mime="text/csv")
             except sqlite3.Error as e:
@@ -302,7 +280,6 @@ else:
                 write_log(user["user_id"], user["role"], "error", f"Audit logs unexpected: {str(e)}")
                 st.error("Unexpected error while loading logs.")
     
-    # --- Export & Backup Page ---
     elif page == "Export & Backup":
         st.header("Export & Backup")
         st.write("Download CSV exports or a backup copy of the SQLite DB file.")
@@ -321,7 +298,6 @@ else:
             st.error("Unexpected error on export page.")
             st.stop()
 
-        # --- Patients CSV ---
         st.subheader("Patients export")
         st.write(f"Total patient records: {len(patients_df)}")
         if st.button("Prepare patients CSV"):
@@ -339,7 +315,6 @@ else:
                 write_log(user["user_id"], user["role"], "error", f"Patients CSV export failed: {str(e)}")
                 st.error("Failed to prepare patients CSV.")
 
-        # --- Logs CSV ---
         st.subheader("Logs export")
         if st.button("Prepare logs CSV"):
             try:
@@ -356,7 +331,6 @@ else:
                 write_log(user["user_id"], user["role"], "error", f"Logs CSV export failed: {str(e)}")
                 st.error("Failed to prepare logs CSV.")
 
-        # --- Database backup ---
         st.subheader("Database backup (SQLite)")
         db_path = Path("hospital.db")
         if db_path.exists():
@@ -367,7 +341,7 @@ else:
                     st.download_button(
                         label="Download hospital.db (backup)",
                         data=db_bytes,
-                        file_name=f"hospital_backup_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.db",
+                        file_name=f"hospital_backup_{datetime.datetime.now(datetime.UTC).strftime('%Y%m%d_%H%M%S')}.db",
                         mime="application/octet-stream",
                         key="db_backup_download"
                     )
@@ -377,7 +351,7 @@ else:
                     st.error("Failed to prepare DB backup.")
 
             if st.button("Create server-side timestamped backup file (copy)"):
-                backup_name = f"hospital_backup_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.db"
+                backup_name = f"hospital_backup_{datetime.datetime.now(datetime.UTC).strftime('%Y%m%d_%H%M%S')}.db"
                 try:
                     shutil.copy(db_path, backup_name)
                     write_log(user["user_id"], user["role"], "backup", f"Created server-side backup file {backup_name}")
@@ -389,7 +363,6 @@ else:
             st.error("Database file not found.")
 
     
-    # --- Logout ---
     elif page == "Logout":
         if st.button("Logout"):
             try:
@@ -399,14 +372,13 @@ else:
             del st.session_state.user
             st.rerun()
     
-    # Footer: show uptime and last synchronization time (we'll show app uptime)
     st.markdown("---")
     try:
-        uptime = datetime.utcnow() - st.session_state["app_start"]
+        uptime = datetime.datetime.now(datetime.UTC) - st.session_state["app_start"]
         # Format uptime
         hours, remainder = divmod(int(uptime.total_seconds()), 3600)
         minutes, seconds = divmod(remainder, 60)
-        footer = f"Uptime: {hours}h {minutes}m {seconds}s  —  Last sync: {datetime.utcnow().isoformat()} UTC"
+        footer = f"Uptime: {hours}h {minutes}m {seconds}s  —  Last sync: {datetime.datetime.now(datetime.UTC).isoformat()} UTC"
         st.caption(footer)
     except Exception:
         st.caption("Uptime information unavailable.")

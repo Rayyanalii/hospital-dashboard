@@ -1,16 +1,13 @@
-# auth.py
 import os
 import hashlib
 import binascii
 from datetime import datetime
 from typing import Optional, Dict
 
-# PBKDF2 parameters
 _PBKDF2_ALGO = "sha256"
 _PBKDF2_ITERATIONS = 100_000
 _SALT_BYTES = 16
 
-# Role permissions (simple RBAC table)
 ROLE_PERMS = {
     "admin": {"view_raw": True, "view_anon": True, "edit": True, "view_logs": True},
     "doctor": {"view_raw": False, "view_anon": True, "edit": False, "view_logs": False},
@@ -28,9 +25,6 @@ def hash_password(password: str, salt: Optional[bytes] = None) -> str:
     return binascii.hexlify(salt).decode() + ":" + binascii.hexlify(dk).decode()
 
 def verify_password(password: str, stored: str) -> bool:
-    """
-    Verify a password against stored salt:hash string.
-    """
     try:
         salt_hex, dk_hex = stored.split(":")
     except Exception:
@@ -40,22 +34,10 @@ def verify_password(password: str, stored: str) -> bool:
     return binascii.hexlify(dk).decode() == dk_hex
 
 def can(role: str, permission: str) -> bool:
-    """
-    Check if a role has a permission (RBAC helper).
-    Permission examples: 'view_raw', 'view_anon', 'edit', 'view_logs'
-    """
+ 
     return ROLE_PERMS.get(role, {}).get(permission, False)
 
-# ---------------------
-# Database / auth ops
-# ---------------------
 def authenticate(username: str, password: str) -> Optional[Dict]:
-    """
-    Authenticate given credentials.
-    Returns {'user_id': int, 'username': str, 'role': str} on success, otherwise None.
-    Also writes a login (success/failure) log entry.
-    """
-    # import inside function to avoid circular imports at module import time
     from db import get_conn
     from logs import write_log
 
@@ -66,7 +48,6 @@ def authenticate(username: str, password: str) -> Optional[Dict]:
         row = cur.fetchone()
         conn.close()
     except Exception as e:
-        # DB error: log as unknown (no user_id) and return None
         try:
             write_log(None, "unknown", "auth_db_error", f"auth DB error for {username}: {str(e)}")
         except Exception:
@@ -74,7 +55,6 @@ def authenticate(username: str, password: str) -> Optional[Dict]:
         return None
 
     if not row:
-        # record failed login attempt (unknown username)
         try:
             write_log(None, "unknown", "login_failed", f"username={username} not found")
         except Exception:
@@ -104,10 +84,6 @@ def authenticate(username: str, password: str) -> Optional[Dict]:
         return None
 
 def create_user(username: str, password: str, role: str) -> bool:
-    """
-    Create a new user with hashed password. Returns True on success, False otherwise.
-    Writes a log entry for the creation (role will be the creator's role if available).
-    """
     from db import get_conn
     from logs import write_log
 
@@ -121,7 +97,6 @@ def create_user(username: str, password: str, role: str) -> bool:
         cur.execute("INSERT INTO users (username, password_hash, role) VALUES (?,?,?)",
                     (username, pwd_hash, role))
         conn.commit()
-        # fetch new user id
         new_id = cur.lastrowid
         conn.close()
         try:
@@ -130,7 +105,6 @@ def create_user(username: str, password: str, role: str) -> bool:
             pass
         return True
     except Exception as e:
-        # could be UNIQUE constraint or DB error
         try:
             write_log(None, "system", "create_user_failed", f"Failed to create {username}: {str(e)}")
         except Exception:
@@ -138,9 +112,7 @@ def create_user(username: str, password: str, role: str) -> bool:
         return False
 
 def change_password(user_id: int, new_password: str) -> bool:
-    """
-    Change password for an existing user by user_id. Returns True on success.
-    """
+
     from db import get_conn
     from logs import write_log
 
@@ -164,9 +136,7 @@ def change_password(user_id: int, new_password: str) -> bool:
         return False
 
 def get_user_by_id(user_id: int) -> Optional[Dict]:
-    """
-    Return user dict by user_id or None.
-    """
+ 
     from db import get_conn
     try:
         conn = get_conn()
@@ -180,20 +150,12 @@ def get_user_by_id(user_id: int) -> Optional[Dict]:
     except Exception:
         return None
 
-# Optional: simple decorator to check permission in Streamlit views (usage example in app.py)
 def require_permission(permission: str):
-    """
-    Decorator factory to wrap a function that receives a 'user' dict as its first arg.
-    If the user's role lacks permission, the wrapped function will return False immediately.
-    Example:
-        @require_permission('view_raw')
-        def view_raw_table(user): ...
-    """
+
     def decorator(func):
         def wrapper(user, *args, **kwargs):
             role = user.get("role") if isinstance(user, dict) else None
             if not role or not can(role, permission):
-                # Log unauthorized access attempt
                 try:
                     from logs import write_log
                     uid = user.get("user_id") if isinstance(user, dict) else None
